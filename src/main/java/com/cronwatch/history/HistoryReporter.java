@@ -1,51 +1,79 @@
 package com.cronwatch.history;
 
+import com.cronwatch.model.CronJob;
+
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalDouble;
+import java.util.stream.Collectors;
 
 /**
- * Generates summary statistics and reports from execution history
- * for a given job, used by the monitor and alert subsystems.
+ * Generates summary reports from execution history for a given cron job.
  */
 public class HistoryReporter {
 
-    private final ExecutionHistoryStore store;
+    private final ExecutionHistoryStore historyStore;
 
-    public HistoryReporter(ExecutionHistoryStore store) {
-        this.store = store;
+    public HistoryReporter(ExecutionHistoryStore historyStore) {
+        if (historyStore == null) {
+            throw new IllegalArgumentException("historyStore must not be null");
+        }
+        this.historyStore = historyStore;
     }
 
-    public double averageDurationSeconds(String jobId) {
-        List<JobExecutionRecord> records = store.getHistory(jobId);
-        OptionalDouble avg = records.stream()
-                .filter(r -> r.getStatus() == JobExecutionRecord.Status.SUCCESS
-                          || r.getStatus() == JobExecutionRecord.Status.FAILED)
-                .mapToLong(r -> r.getDuration().getSeconds())
-                .average();
-        return avg.orElse(0.0);
-    }
+    /**
+     * Returns a summary report for the given job over the specified lookback window.
+     *
+     * @param job          the cron job to report on
+     * @param lookbackDays number of days to look back in history
+     * @return a {@link JobHistorySummary} containing aggregated metrics
+     */
+    public JobHistorySummary summarize(CronJob job, int lookbackDays) {
+        if (job == null) {
+            throw new IllegalArgumentException("job must not be null");
+        }
+        if (lookbackDays <= 0) {
+            throw new IllegalArgumentException("lookbackDays must be positive");
+        }
 
-    public long failureCount(String jobId) {
-        return store.getHistory(jobId).stream()
-                .filter(r -> r.getStatus() == JobExecutionRecord.Status.FAILED
-                          || r.getStatus() == JobExecutionRecord.Status.TIMEOUT)
+        Instant cutoff = Instant.now().minus(Duration.ofDays(lookbackDays));
+        List<JobExecutionRecord> records = historyStore.getRecords(job.getId()).stream()
+                .filter(r -> r.getStartTime() != null && r.getStartTime().isAfter(cutoff))
+                .collect(Collectors.toList());
+
+        if (records.isEmpty()) {
+            return new JobHistorySummary(job.getId(), 0, 0, 0.0, 0.0, 0.0);
+        }
+
+        long totalRuns = records.size();
+        long exceededCount = records.stream()
+                .filter(JobExecutionRecord::isExceededThreshold)
                 .count();
-    }
 
-    public Duration maxDuration(String jobId) {
-        return store.getHistory(jobId).stream()
-                .map(JobExecutionRecord::getDuration)
-                .max(Duration::compareTo)
-                .orElse(Duration.ZERO);
-    }
+        OptionalDouble avgMs = records.stream()
+                .filter(r -> r.getDurationMillis() >= 0)
+                .mapToLong(JobExecutionRecord::getDurationMillis)
+                .average();
 
-    public String summarize(String jobId) {
-        List<JobExecutionRecord> records = store.getHistory(jobId);
-        if (records.isEmpty()) return "No history for job: " + jobId;
-        return String.format(
-                "Job '%s': runs=%d, failures=%d, avgDuration=%.1fs, maxDuration=%s",
-                jobId, records.size(), failureCount(jobId),
-                averageDurationSeconds(jobId), maxDuration(jobId));
+        long maxMs = records.stream()
+                .mapToLong(JobExecutionRecord::getDurationMillis)
+                .max()
+                .orElse(0L);
+
+        long minMs = records.stream()
+                .mapToLong(JobExecutionRecord::getDurationMillis)
+                .min()
+                .orElse(0L);
+
+        return new JobHistorySummary(
+                job.getId(),
+                totalRuns,
+                exceededCount,
+                avgMs.orElse(0.0),
+                (double) maxMs,
+                (double) minMs
+        );
     }
 }
