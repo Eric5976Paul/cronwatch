@@ -49,6 +49,16 @@ public class CronJob {
         }
     }
 
+    /**
+     * Marks the job as failed with the given end time.
+     *
+     * @param endTime the time at which the failure was detected
+     */
+    public void markFailed(Instant endTime) {
+        this.lastEndTime = endTime;
+        this.status = JobStatus.FAILED;
+    }
+
     public Duration getActualDuration() {
         if (lastStartTime == null || lastEndTime == null) return null;
         return Duration.between(lastStartTime, lastEndTime);
